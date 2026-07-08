@@ -137,6 +137,128 @@ mysqlsh --host <DB_HOST> \
    util.checkForServerUpgrade({targetVersion: "8.4.0"})
    ```
 
+### 📋 4.1 Detailed Utility Checks
+The MySQL Shell Upgrade Checker executes the following automated compatibility checks. AI agents can reference these unique Check IDs to parse and correlate diagnosis results when identifying root causes and recommending remediation paths.
+
+#### Automated Audit Check Registry
+
+| Category | Check ID | Description |
+| :--- | :--- | :--- |
+| **SQL & Reserved Keywords** | `routineSyntax` | Checks routine (procedures/functions) syntax for conflicts with reserved keywords. |
+| | `reservedKeywords` | Checks database object names (tables, columns, etc.) for conflicts with new reserved keywords. |
+| | `groupbyAscSyntax` | Checks for obsolete or removed `GROUP BY ASC` or `DESC` syntax usage. |
+| | `emptyDotTableSyntax` | Checks for deprecated `.tableName` syntax used in stored routines. |
+| | `dollarSignName` | Checks for deprecated usage of single dollar signs ($) in object names. |
+| **Data Types & Schemas** | `oldTemporal` | Checks for usage of deprecated temporal type formats. |
+| | `utf8mb3` | Checks for usage of the `utf8mb3` character set (`utf8mb4` is recommended). |
+| | `enumSetElementLength` | Checks for ENUM/SET column definitions containing elements longer than 255 characters. |
+| | `zeroDates` | Checks for invalid zero date, datetime, or timestamp values (`0000-00-00`). |
+| | `ftsInTablename` | Checks for table names containing `FTS` (Full-Text Search prefixes), unsupported in 8.0+. |
+| | `columnsWhichCannotHaveDefaults` | Checks for columns that cannot have default values (BLOB, TEXT, GEOMETRY, JSON). |
+| | `columnDefinition` | Checks for general errors or invalid configurations in column definitions. |
+| **Infrastructure & Storage** | `mysqlSchema` | Checks for table names in the `mysql` system schema that conflict with target version tables. |
+| | `nonNativePartitioning` | Checks for partitioned tables using non-native partitioning. |
+| | `partitionedTablesInSharedTablespaces` | Checks for partitioned tables placed inside shared tablespaces. |
+| | `circularDirectory` | Checks for circular directory references in tablespace data file paths. |
+| | `schemaInconsistency` | Checks for schema inconsistencies resulting from file removal or corruption. |
+| | `engineMixup` | Checks for tables recognized by InnoDB but belonging to a different engine. |
+| | `innodbRowFormat` | Checks for InnoDB tables utilizing a non-default row format. |
+| **Constraints & Indexes** | `foreignKeyLength` | Checks for foreign key constraint names longer than 64 characters. |
+| | `oldGeometryTypes` | Checks for deprecated spatial data columns created in MySQL 5.6. |
+| | `indexTooLarge` | Checks for extremely large indexes which are not supported by MySQL 8.0+. |
+| | `invalidEngineForeignKey` | Checks for columns with foreign keys pointing to tables from a different storage engine. |
+| | `partitionsWithPrefixKeys` | Checks for partitions by key using columns with prefix key indexes. |
+| | `foreignKeyReferences` | Checks for foreign keys referencing non-unique and partial indexes. |
+| **System Settings & Env** | `maxdbSqlModeFlags` | Checks for usage of the obsolete `sql_mode` flag, `MAXDB`. |
+| | `obsoleteSqlModeFlags` | Checks for usage of other obsolete or removed `sql_mode` flags. |
+| | `removedFunctions` | Checks for functions which have been completely removed in the target MySQL version. |
+| | `removedSysLogVars` | Checks for deprecated system variables used to configure system logging. |
+| | `removedSysVars` | Checks for system variables used in the source DB that were removed in the target. |
+| | `sysVarsNewDefaults` | Checks for system variables with changed default values (requires `--configPath`). |
+| | `sysvarAllowedValues` | Checks system variables for valid value ranges or allowed options. |
+| **Security & Plugins** | `defaultAuthenticationPlugin` | Checks for usage of legacy authentication plugins (e.g., `mysql_native_password`). |
+| | `defaultAuthenticationPluginMds` | Checks for legacy authentication plugins in use within Metadata Schema (MDS). |
+| | `deprecatedDefaultAuth` | Checks for deprecated or invalid default authentication methods in system variables. |
+| | `authMethodUsage` | Checks for deprecated or invalid user account authentication methods. |
+| | `invalidPrivileges` | Checks for user privileges that will be removed or are no longer valid. |
+| | `pluginUsage` | Checks for deprecated, disabled, or removed plugins. |
+| **Diagnostics & 5.7 Legacy** | `checkTableCommand` | Checks for issues reported by the `CHECK TABLE ... FOR UPGRADE` command. |
+| | `changedFunctionsInGeneratedColumns` | Checks for indexes on functions whose semantics have changed in the target version. |
+| | `invalid57Names` | Checks for invalid table and schema names utilized in MySQL 5.7. |
+| | `orphanedObjects` | Checks for orphaned routines and events originating from MySQL 5.7. |
+| | `deprecatedRouterAuthMethod` | Checks for deprecated/invalid authentication methods used by MySQL Router internal accounts. |
+| | `deprecatedTemporalDelimiter` | Checks for deprecated temporal delimiters in table partitions. |
+
+---
+
+### 📊 4.2 JSON Output Structure Reference
+When extracting diagnostic reports using the `--output-format=JSON` option, the returned payload utilizes a well-defined tree schema. AI agents must leverage the following keys to accurately parse and process the compatibility report:
+
+```json
+{
+  "host": "localhost",
+  "port": 3306,
+  "serverVersion": "8.0.35",
+  "targetVersion": "8.4.0",
+  "errorCount": 2,
+  "warningCount": 5,
+  "noticeCount": 1,
+  "summary": "2 errors were found. Please correct these issues before upgrading.",
+  "checks": [
+    {
+      "id": "defaultAuthenticationPlugin",
+      "name": "Default authentication plugin considerations",
+      "status": "ERROR",
+      "description": "Checks for older authentication plugins...",
+      "documentationLink": "https://dev.mysql.com/doc/refman/8.4/en/...",
+      "results": [
+        {
+          "level": "Error",
+          "dbObject": "mysql.user",
+          "description": "User 'app_user'@'%' is using deprecated 'mysql_native_password' plugin.",
+          "objectType": "User"
+        }
+      ]
+    }
+  ],
+  "manualChecks": [
+    {
+      "id": "newDefaults",
+      "name": "New default values for system variables",
+      "description": "The default values of some system variables have changed...",
+      "documentationLink": "https://dev.mysql.com/doc/refman/8.4/en/..."
+    }
+  ]
+}
+```
+
+#### JSON Key Schema Definitions
+
+1. **Top-Level Summary Properties**:
+   - `host` / `port`: Connection details for the checked MySQL server.
+   - `serverVersion`: Detected version of the active source database.
+   - `targetVersion`: Intended destination version for the upgrade.
+   - `errorCount` / `warningCount` / `noticeCount`: Aggregated tally of found issues.
+   - `summary`: High-level textual summary of findings.
+
+2. **Automated Check Registry (`checks` array)**:
+   - `id`: Unique identifier matching the automated check keys (e.g., `defaultAuthenticationPlugin`).
+   - `name`: Short, human-readable name of the test.
+   - `status`: Outcome status, either `OK` or `ERROR`.
+   - `description`: Detailed diagnostic summary and advice.
+   - `documentationLink`: URL link pointing to the official MySQL Reference Manual.
+   - `results` (Array of detailed violations):
+     - `level`: Severity level (`Error`, `Warning`, `Notice`).
+     - `dbObject`: Fully-qualified database object name affected by the issue.
+     - `description`: Detailed, object-specific fact explaining the incompatibility.
+     - `objectType`: Structural class of the object (`Schema`, `Table`, `View`, `Column`, `Index`, `ForeignKey`, `Routine`, `Event`, `Trigger`, `SystemVariable`, `User`, `Tablespace`, or `Plugin`).
+
+3. **Manual Verification Registry (`manualChecks` array)**:
+   - `id`: Unique identifier for the manual verification step.
+   - `name`: Brief description of the manual checklist item.
+   - `description`: In-depth manual remediation instructions and guardrails.
+   - `documentationLink`: URL link to the official documentation for manual resolution steps.
+
 ---
 
 ## 5. Custom Python Diagnostic Tool (Lightweight Audit)

@@ -3,22 +3,55 @@
 # Cloud SQL for MySQL 8.4 Upgrade Checker Agent - Simplified Deployer
 # ==============================================================================
 # 이 스크립트는 .env의 내용을 바탕으로 빌드, 배포, 트리거 연동을 군더더기 없이 기계적으로 수행합니다.
-# 임의의 대안(Fallback)이나 복잡한 동적 생성은 배제되며, .env 누락 시 즉시 실패 종료됩니다.
+# # ==============================================================================
+#  0. 환경 변수 감지, 로드 및 엄격 밸리데이션 검사
+# ==============================================================================
 
+# 에러 발생 시 즉각 스크립트 중단, 미선언 변수 에러 처리, 파이프라인 에러 전파 활성화 (Fail Fast)
 set -euo pipefail
 
-# 0. .env 파일이 존재하는지 필수 검증하고 로드
-ENV_FILE="$(dirname "$0")/.env"
+# 스크립트가 위치한 물리적 디렉토리 경로를 강제 앵커링하여 상위 폴더 등 임의 위치 호출 시 상대 경로 붕괴 현상을 원천 방지
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+ENV_FILE=".env"
 if [ ! -f "$ENV_FILE" ]; then
   echo "❌ 에러: .env 파일이 존재하지 않습니다. 먼저 .env 파일을 준비해 주세요."
   exit 1
 fi
 
 echo "ℹ️  $ENV_FILE 파일로부터 설정을 로드합니다..."
-# 주석 및 공백 줄을 제외하고 환경 변수로 즉시 로드
 export $(grep -v '^#' "$ENV_FILE" | xargs)
 
-# 1-1. 전용 서비스 계정(SA) 자동 확인 및 생성
+# [필수 변수 유무 검증] 단 하나의 필수 값이라도 정의되어 있지 않으면 대안 없이 즉각 중단
+REQUIRED_VARS=(
+  "GOOGLE_CLOUD_PROJECT"
+  "GOOGLE_CLOUD_LOCATION"
+  "STAGING_BUCKET_URI"
+  "SERVICE_ACCOUNT"
+  "GCP_RESOURCES_LOCATION"
+  "GCS_MCP_SERVER"
+)
+
+for var in "${REQUIRED_VARS[@]}"; do
+  if [ -z "${!var:-}" ]; then
+    echo "❌ 에러: .env 파일에 필수 설정 변수인 '$var'가 정의되어 있지 않습니다. 배포를 중단합니다."
+    exit 1
+  fi
+done
+
+# ==============================================================================
+#  1. 배포 구성 변수 모음 (설정값 일원화 관리)
+# ==============================================================================
+# Cloud Run 서비스 식별 이름 정보
+SERVICE_NAME="cloudsql-upgrade-checker"
+FRONTEND_SERVICE_NAME="cloudsql-upgrade-checker-frontend"
+
+# 업그레이드 체커 트리거 및 GCS 구성 정보
+TRIGGER_PREFIX="check-results"
+TRIGGER_BUCKET=$(echo "$STAGING_BUCKET_URI" | sed 's|^gs://||')
+
+# 서비스 계정(SA) 정보 자동 가공 및 구조화
 PROJECT_ID="$GOOGLE_CLOUD_PROJECT"
 if [[ "$SERVICE_ACCOUNT" == *@* ]]; then
   SA_EMAIL="$SERVICE_ACCOUNT"
@@ -28,6 +61,19 @@ else
   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 fi
 
+# 서비스 계정에 부여할 최소 권한(IAM Role) 모음
+REQUIRED_SA_ROLES=(
+  "roles/aiplatform.user"
+  "roles/storage.objectUser"
+  "roles/eventarc.eventReceiver"
+  "roles/run.invoker"
+  "roles/agentregistry.viewer"
+  "roles/mcp.toolUser"
+)
+
+# ==============================================================================
+#  2. 전용 서비스 계정(SA) 리소스 확인, 생성 및 권한 연동
+# ==============================================================================
 echo "----------------------------------------------------------------------"
 echo "🔑 [전용 SA 구성] 서비스 계정 상태 확인 및 생성 중... ($SA_EMAIL)"
 echo "----------------------------------------------------------------------"
@@ -37,16 +83,6 @@ if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" >/
     --display-name="MySQL 8.4 Upgrade Checker Service Account" \
     --project="$PROJECT_ID"
 fi
-
-# 필수 IAM 역할 부여 (필수 에이전트 구동 및 GCS MCP 구동 권한)
-REQUIRED_SA_ROLES=(
-  "roles/aiplatform.user"
-  "roles/storage.objectUser"
-  "roles/eventarc.eventReceiver"
-  "roles/run.invoker"
-  "roles/agentregistry.viewer"
-  "roles/mcp.toolUser"
-)
 
 echo "🔒 서비스 계정에 필요한 최소 IAM 역할을 부여합니다..."
 for role in "${REQUIRED_SA_ROLES[@]}"; do
@@ -76,34 +112,13 @@ if [ -n "$PROJECT_NUMBER" ]; then
     --project="$PROJECT_ID" >/dev/null 2>&1 || true
 fi
 
-# 1. 필수 설정 변수 엄격 검증 (단 하나의 필수 값이라도 없으면 대안 없이 즉각 중단)
-REQUIRED_VARS=(
-  "GOOGLE_CLOUD_PROJECT"
-  "GOOGLE_CLOUD_LOCATION"
-  "STAGING_BUCKET_URI"
-  "SERVICE_ACCOUNT"
-  "GCP_RESOURCES_LOCATION"
-  "SERVICE_NAME"
-  "GCS_MCP_SERVER"
-)
-
-for var in "${REQUIRED_VARS[@]}"; do
-  if [ -z "${!var:-}" ]; then
-    echo "❌ 에러: .env 파일에 필수 설정 변수인 '$var'가 정의되어 있지 않습니다. 배포를 중단합니다."
-    exit 1
-  fi
-done
-
-# GCS 버킷 URI에서 gs:// 접두사를 떼어낸 순수 버킷 이름 추출
-TRIGGER_BUCKET=$(echo "$STAGING_BUCKET_URI" | sed 's|^gs://||')
-TRIGGER_PREFIX="check-results"
-
 echo "======================================================================"
 echo "🚀 배포 구성을 시작합니다 (.env 입력 정보)"
 echo "======================================================================"
 echo "📍 GCP 프로젝트 ID: $GOOGLE_CLOUD_PROJECT"
 echo "📍 배포 대상 리전: $GCP_RESOURCES_LOCATION"
-echo "📍 Cloud Run 서비스: $SERVICE_NAME"
+echo "📍 ADK Agent on Cloud Run: $SERVICE_NAME"
+echo "📍 Frontend on Cloud Run: $FRONTEND_SERVICE_NAME"
 echo "📍 이벤트 감지 GCS 버킷: $TRIGGER_BUCKET"
 echo "📍 사용 서비스 계정: $SERVICE_ACCOUNT"
 echo "======================================================================"
@@ -159,6 +174,29 @@ gcloud eventarc triggers create "$TRIGGER_NAME" \
   --event-filters="bucket=$TRIGGER_BUCKET" \
   --service-account="$SA_EMAIL"
 
+# 6. Frontend Gradio Dashboard 배포 (Cloud Run)
+echo "----------------------------------------------------------------------"
+echo "🖥️  5단계: Frontend 대시보드를 Cloud Run에 배포합니다... ($FRONTEND_SERVICE_NAME)"
+echo "----------------------------------------------------------------------"
+
+# frontend 소스 디렉토리에서 Cloud Run에 다이렉트 소스 빌드 배포를 진행합니다.
+# Gradio 구동 포트인 7860을 Cloud Run 서비스에 명시적으로 노출시킵니다.
+gcloud run deploy "$FRONTEND_SERVICE_NAME" \
+  --source ./frontend \
+  --region "$GCP_RESOURCES_LOCATION" \
+  --project "$GOOGLE_CLOUD_PROJECT" \
+  --port=7860 \
+  --allow-unauthenticated \
+  --set-env-vars="STAGING_BUCKET_URI=$STAGING_BUCKET_URI" \
+  --service-account="$SA_EMAIL"
+
+# 배포된 Frontend URL 획득
+FRONTEND_URL=$(gcloud run services describe "$FRONTEND_SERVICE_NAME" --region "$GCP_RESOURCES_LOCATION" --project "$GOOGLE_CLOUD_PROJECT" --format 'value(status.url)')
+
 echo "======================================================================"
 echo "🎉 모든 배포 및 Eventarc 트리거 연동이 성공적으로 완료되었습니다!"
 echo "======================================================================"
+echo "👉 Backend Agent 트리거 URL: $RUN_URL"
+echo "👉 Frontend 대시보드 URL : $FRONTEND_URL"
+echo "======================================================================"
+
