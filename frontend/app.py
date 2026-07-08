@@ -30,6 +30,8 @@ def get_report_files():
         md_files = []
         for blob in blobs:
             if blob.name.endswith(".md"):
+                # 상세 메타데이터(time_created 등) 원격 로드 강제화
+                blob.reload()
                 # GCS time_created(UTC)를 한국 시간(KST, UTC+9)으로 올바르게 변환 및 포맷팅
                 kst_time = blob.time_created + timedelta(hours=9)
                 display_name = kst_time.strftime("📅 %Y-%m-%d %H:%M:%S")
